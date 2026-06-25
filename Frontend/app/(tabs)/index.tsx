@@ -12,44 +12,43 @@ import {
   Text,
   TouchableOpacity,
   Vibration,
-  View
+  View,
+  Alert,
+  StatusBar
 } from 'react-native';
 import Animated, {
-  Easing,
   FadeIn,
   SlideInDown,
   SlideOutDown,
   useAnimatedStyle,
   useSharedValue,
   withRepeat,
-  withTiming
+  withTiming,
+  Easing
 } from 'react-native-reanimated';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { API_URL } from '../../src/config';
-// import { API_URL } from '../../src/config'; // Uncomment this in your real app
 
-
-const { width } = Dimensions.get('window');
-
-// --- UPDATED TYPES TO MATCH JSON ---
-interface DeepfakeModel {
-  name: string;
-  status: string;
-  score: number | null;
-  finalScore: number | null; // Added based on your JSON
-  normalizedScore: number | null;
-}
-
+// Types matching Backend Response
 interface AnalysisResult {
-  requestId: string;
-  overallStatus: string;
-  resultsSummary: {
-    status: string;
-    metadata: {
-      finalScore?: number;
-    }
+  final_verdict: string;
+  final_score: number;
+  confidence: string;
+  summary: string;
+  model_breakdown: {
+    model_name: string;
+    score: number;
+    label: string;
+    error?: string;
+    details?: string;
+    retry_count?: number;
+  }[];
+  metrics?: {
+    total_models: number;
+    successful_models: number;
+    failed_models: number;
+    average_latency_ms: number;
   };
-  deepfakeModels: DeepfakeModel[];
 }
 
 interface ErrorState {
@@ -118,12 +117,55 @@ const HomeScreen: React.FC = () => {
   const [selectedImage, setSelectedImage] = useState<ImagePicker.ImagePickerAsset | null>(null);
   const [results, setResults] = useState<AnalysisResult | null>(null);
   const [loading, setLoading] = useState<boolean>(false);
-  const [statusMessage, setStatusMessage] = useState<string>('');
+  const [step, setStep] = useState<'idle' | 'uploading' | 'analyzing' | 'complete'>('idle');
+  const [uploadProgress, setUploadProgress] = useState<number>(0);
   const [error, setError] = useState<ErrorState>({ visible: false, title: '', message: '' });
 
   const showError = (title: string, message: string, code?: string) => {
     Vibration.vibrate();
     setError({ visible: true, title, message, code });
+  };
+
+  const fetchWithRetry = async (url: string, options: RequestInit = {}, retries = 3, backoff = 1000) => {
+    try {
+      const headers = {
+        ...options.headers,
+        'Accept': 'application/json',
+      };
+
+      // Add 90s timeout (matching backend max timeout)
+      const controller = new AbortController();
+      const id = setTimeout(() => controller.abort(), 90000);
+
+      const res = await fetch(url, { ...options, headers, signal: controller.signal });
+      clearTimeout(id);
+
+      if (!res.ok) {
+        // Handle 500 errors that return JSON
+        const contentType = res.headers.get("content-type");
+        if (contentType && contentType.indexOf("application/json") !== -1) {
+          const errorData = await res.json();
+          // If it's a structured error from our backend, return it as result if possible, or throw
+          if (errorData.final_verdict === "Error") {
+            return { ok: true, json: () => Promise.resolve(errorData) } as Response;
+          }
+          throw new Error(errorData.detail || `Server Error: ${res.status}`);
+        }
+
+        if (res.status >= 500 && retries > 0) {
+          throw new Error(`Retryable error: ${res.status}`);
+        }
+        throw new Error(`Request failed with status ${res.status}`);
+      }
+      return res;
+    } catch (err: any) {
+      if (retries > 0 && (err.message.includes('Retryable') || err.name === 'AbortError' || err.message.includes('Network request failed'))) {
+        console.log(`Retrying... attempts left: ${retries}`);
+        await new Promise(r => setTimeout(r, backoff));
+        return fetchWithRetry(url, options, retries - 1, backoff * 1.5);
+      }
+      throw err;
+    }
   };
 
   const pickImage = async () => {
@@ -135,13 +177,20 @@ const HomeScreen: React.FC = () => {
       }
 
       const result = await ImagePicker.launchImageLibraryAsync({
-        mediaTypes: ['images'],
+        mediaTypes: ImagePicker.MediaTypeOptions.Images,
         allowsEditing: true,
-        quality: 1,
+        quality: 0.8, // Optimize size
       });
 
       if (!result.canceled && result.assets[0]) {
-        setSelectedImage(result.assets[0]);
+        const asset = result.assets[0];
+        // Check file size if possible (approximate)
+        if (asset.fileSize && asset.fileSize > 10 * 1024 * 1024) {
+          showError("File Too Large", "Please select an image under 10MB.", "SIZE_01");
+          return;
+        }
+
+        setSelectedImage(asset);
         setResults(null);
         setError({ ...error, visible: false });
       }
@@ -154,219 +203,283 @@ const HomeScreen: React.FC = () => {
     if (!selectedImage) return;
 
     setLoading(true);
+    setStep('uploading');
     setResults(null);
+    setUploadProgress(0);
     setError({ ...error, visible: false });
 
     try {
-      setStatusMessage('Initializing secure upload...');
+      // Simulate upload progress
+      const progressInterval = setInterval(() => {
+        setUploadProgress(prev => {
+          if (prev >= 90) return 90;
+          return prev + 10;
+        });
+      }, 300);
 
       const formData = new FormData();
+
       if (Platform.OS === 'web') {
         const res = await fetch(selectedImage.uri);
         const blob = await res.blob();
-        formData.append('file', blob, 'upload.jpg');
+        let filename = selectedImage.fileName || 'upload.jpg';
+        const fileType = blob.type || 'image/jpeg';
+
+        // Ensure extension matches mime type
+        if (fileType === 'image/png' && !filename.endsWith('.png')) filename += '.png';
+        if (fileType === 'image/jpeg' && !filename.match(/\.jpe?g$/)) filename += '.jpg';
+
+        formData.append('file', blob, filename);
       } else {
+        const filename = selectedImage.fileName || selectedImage.uri.split('/').pop() || 'upload.jpg';
+        const match = /\.(\w+)$/.exec(filename);
+        const type = match ? `image/${match[1]}` : 'image/jpeg';
+
         formData.append('file', {
           uri: selectedImage.uri,
-          name: 'upload.jpg',
-          type: 'image/jpeg',
+          name: filename,
+          type: type,
         } as any);
       }
 
-      const uploadRes = await fetch(`${API_URL}/upload`, {
+      setStep('analyzing');
+
+      // Use configured API URL
+      const uploadRes = await fetchWithRetry(`${API_URL}/upload`, {
         method: 'POST',
         body: formData,
       });
 
-      if (!uploadRes.ok) throw new Error(`Server responded with ${uploadRes.status}`);
-      const { requestId } = await uploadRes.json();
-      if (!requestId) throw new Error("No Request ID received");
+      clearInterval(progressInterval);
+      setUploadProgress(100);
 
-      setStatusMessage('Analyzing image patterns...');
-      let attempts = 0;
-      const maxAttempts = 30;
+      const data = await uploadRes.json();
+      console.log("Ensemble Result:", data);
 
-      while (attempts < maxAttempts) {
-        await new Promise(r => setTimeout(r, 2000));
-        const pollRes = await fetch(`${API_URL}/result/${requestId}`);
-
-        if (pollRes.ok) {
-          const data = await pollRes.json();
-          // Check specifically for final statuses
-          if (['COMPLETED', 'DONE', 'FAKE', 'AUTHENTIC', 'MANIPULATED'].includes(data.overallStatus)) {
-            setResults(data);
-            setLoading(false);
-            return;
-          }
-          if (data.overallStatus === 'FAILED') throw new Error("Analysis failed on server");
-        }
-        attempts++;
+      if (data.final_verdict === "Error" && data.model_breakdown.length === 0) {
+        throw new Error(data.summary || "Analysis failed");
       }
-      throw new Error("Analysis timed out");
 
-    } catch (e: any) {
+      setResults(data);
+      setStep('complete');
+
+    } catch (err: any) {
+      console.error(err);
+      showError("Analysis Failed", err.message || "Could not connect to server.", "NET_01");
+      setStep('idle');
+    } finally {
       setLoading(false);
-      showError("Verification Failed", e.message || "Unable to verify image.", "NET_ERR");
     }
   };
 
-  // Logic: Higher score = Higher chance of being Fake
   const getScoreColor = (score: number) => {
-    if (score > 70) return '#ff4444'; // High probability of fake
-    if (score > 40) return '#ffbb33'; // Suspicious
-    return '#00c851'; // Low probability (Authentic)
+    if (score > 75) return '#ff4444'; // Fake
+    if (score > 50) return '#ffbb33'; // Suspicious
+    return '#00c851'; // Real
   };
 
   const getVerdictUI = () => {
     if (!results) return null;
-    const isFake = ['FAKE', 'MANIPULATED'].includes(results.overallStatus);
-    const isAuthentic = results.overallStatus === 'AUTHENTIC';
 
-    const color = isFake ? '#ff4444' : (isAuthentic ? '#00c851' : '#4facfe');
-    const icon = isFake ? 'warning' : (isAuthentic ? 'checkmark-circle' : 'help-circle');
-    const text = isFake ? 'MANIPULATION DETECTED' : (isAuthentic ? 'AUTHENTIC MEDIA' : results.overallStatus);
+    const verdict = results.final_verdict;
+
+    let color, icon, text;
+
+    if (verdict === 'Fake') {
+      color = '#ff4444';
+      icon = 'warning';
+      text = 'MANIPULATION DETECTED';
+    } else if (verdict === 'Suspicious') {
+      color = '#ffbb33';
+      icon = 'alert-circle';
+      text = 'SUSPICIOUS ACTIVITY';
+    } else if (verdict === 'Error') {
+      color = '#888888';
+      icon = 'help-circle';
+      text = 'ANALYSIS FAILED';
+    } else {
+      color = '#00c851';
+      icon = 'checkmark-circle';
+      text = 'AUTHENTIC MEDIA';
+    }
 
     return { color, icon, text };
   };
 
-  const verdict = getVerdictUI();
+  const renderResults = () => {
+    if (!results) return null;
+    const ui = getVerdictUI();
+
+    return (
+      <Animated.View entering={FadeIn} style={styles.resultContainer}>
+        <View style={[styles.verdictCard, { borderColor: ui?.color }]}>
+          <Ionicons name={ui?.icon as any} size={48} color={ui?.color} />
+          <Text style={[styles.verdictTitle, { color: ui?.color }]}>{ui?.text}</Text>
+          <Text style={styles.verdictScore}>
+            Score: {results.final_score}%
+          </Text>
+          <Text style={styles.verdictConfidence}>
+            Confidence: {results.confidence}
+          </Text>
+        </View>
+
+        <View style={styles.detailsContainer}>
+          <Text style={styles.subHeader}>MODEL BREAKDOWN</Text>
+
+          {results.model_breakdown.map((model, idx) => (
+            <View key={idx} style={styles.modelRow}>
+              <View style={styles.modelInfo}>
+                <Text style={styles.modelName}>{model.model_name}</Text>
+                <View style={styles.badgeContainer}>
+                  <Text style={[styles.modelStatus, {
+                    color: model.label === 'Error' ? '#ff4444' :
+                      model.label === 'Fake' ? '#ff4444' :
+                        model.label === 'Real' ? '#00c851' : '#aaa'
+                  }]}>
+                    {model.label}
+                  </Text>
+                </View>
+              </View>
+
+              {model.error ? (
+                <Text style={styles.modelError}>{model.error}</Text>
+              ) : (
+                <View style={styles.scoreContainer}>
+                  <View style={styles.progressBarBg}>
+                    <View
+                      style={[
+                        styles.progressBarFill,
+                        {
+                          width: `${Math.min(model.score, 100)}%`,
+                          backgroundColor: getScoreColor(model.score)
+                        }
+                      ]}
+                    />
+                  </View>
+                  <Text style={styles.scoreText}>{Math.round(model.score)}%</Text>
+                </View>
+              )}
+              {model.details && <Text style={styles.modelDetails}>{model.details}</Text>}
+            </View>
+          ))}
+
+          {results.metrics && (
+            <View style={styles.metricsContainer}>
+              <Text style={styles.metricText}>Models: {results.metrics.successful_models}/{results.metrics.total_models}</Text>
+              <Text style={styles.metricText}>Latency: {results.metrics.average_latency_ms}ms</Text>
+            </View>
+          )}
+
+          <Text style={styles.summaryText}>{results.summary}</Text>
+        </View>
+
+        <TouchableOpacity
+          style={styles.resetButton}
+          onPress={() => {
+            setResults(null);
+            setSelectedImage(null);
+            setStep('idle');
+          }}
+        >
+          <Text style={styles.resetButtonText}>Scan Another Image</Text>
+        </TouchableOpacity>
+      </Animated.View>
+    );
+  };
 
   return (
     <SafeAreaView style={styles.container}>
+      <StatusBar barStyle="light-content" />
       <ScrollView contentContainerStyle={styles.scrollContent}>
+        {/* Render Results Component */}
+        {renderResults()}
 
         {/* Header */}
-        <View style={styles.header}>
-          <View style={styles.statusBadge}>
-            <View style={styles.statusDot} />
-            <Text style={styles.statusText}>SYSTEM ONLINE</Text>
+        {!results && (
+          <View style={styles.header}>
+            <View style={styles.statusBadge}>
+              <View style={styles.statusDot} />
+              <Text style={styles.statusText}>SYSTEM ONLINE</Text>
+            </View>
+            <Text style={styles.headerTitle}>CATCHY<Text style={{ color: '#4facfe' }}> AI</Text></Text>
           </View>
-          <Text style={styles.headerTitle}>CATCHY<Text style={{ color: '#4facfe' }}> AI</Text></Text>
-        </View>
+        )}
 
         {/* Main Interface */}
-        <View style={styles.card}>
-          {selectedImage ? (
-            <View style={styles.previewContainer}>
-              <Image source={{ uri: selectedImage.uri }} style={styles.previewImage} />
-              {loading && <ScanLine />}
-              <TouchableOpacity
-                style={styles.closeBtn}
-                onPress={() => {
-                  setSelectedImage(null);
-                  setResults(null);
-                }}
-              >
-                <Ionicons name="close" size={20} color="#fff" />
-              </TouchableOpacity>
-            </View>
-          ) : (
-            <TouchableOpacity
-              style={styles.uploadZone}
-              onPress={pickImage}
-              activeOpacity={0.8}
-            >
-              <LinearGradient
-                colors={['rgba(79, 172, 254, 0.1)', 'rgba(0, 242, 254, 0.05)']}
-                style={styles.uploadGradient}
-              >
-                <Ionicons name="aperture" size={64} color="#4facfe" />
-                <Text style={styles.uploadTitle}>TAP TO SCAN</Text>
-                <Text style={styles.uploadSubtitle}>Upload image for verification</Text>
-              </LinearGradient>
-            </TouchableOpacity>
-          )}
-
-          {/* Controls */}
-          <View style={styles.controls}>
-            {loading ? (
-              <View style={styles.loadingContainer}>
-                <ActivityIndicator color="#4facfe" size="large" />
-                <Text style={styles.loadingText}>{statusMessage}</Text>
+        {!results && (
+          <View style={styles.card}>
+            {selectedImage ? (
+              <View style={styles.previewContainer}>
+                <Image source={{ uri: selectedImage.uri }} style={styles.previewImage} />
+                {loading && <ScanLine />}
+                {!loading && (
+                  <TouchableOpacity
+                    style={styles.closeBtn}
+                    onPress={() => {
+                      setSelectedImage(null);
+                      setResults(null);
+                      setStep('idle');
+                    }}
+                  >
+                    <Ionicons name="close" size={20} color="#fff" />
+                  </TouchableOpacity>
+                )}
               </View>
             ) : (
               <TouchableOpacity
-                style={[styles.verifyBtn, !selectedImage && styles.disabledBtn]}
-                onPress={handleVerify}
-                disabled={!selectedImage}
+                style={styles.uploadZone}
+                onPress={pickImage}
+                activeOpacity={0.8}
               >
                 <LinearGradient
-                  colors={selectedImage ? ['#4facfe', '#00f2fe'] : ['#333', '#333']}
-                  start={{ x: 0, y: 0 }}
-                  end={{ x: 1, y: 0 }}
-                  style={styles.btnGradient}
+                  colors={['rgba(79, 172, 254, 0.1)', 'rgba(0, 242, 254, 0.05)']}
+                  style={styles.uploadGradient}
                 >
-                  <Text style={styles.btnText}>INITIATE SCAN</Text>
-                  <Ionicons name="arrow-forward" size={20} color={selectedImage ? "#000" : "#666"} />
+                  <Ionicons name="aperture" size={64} color="#4facfe" />
+                  <Text style={styles.uploadTitle}>TAP TO SCAN</Text>
+                  <Text style={styles.uploadSubtitle}>Upload image for verification</Text>
                 </LinearGradient>
               </TouchableOpacity>
             )}
-          </View>
-        </View>
 
-        {/* RESULTS SECTION - Corrected Logic */}
-        {results && verdict && (
-          <Animated.View entering={FadeIn} style={[styles.resultsContainer, { borderColor: verdict.color }]}>
-
-            {/* 1. Main Verdict Header */}
-            <View style={styles.verdictHeader}>
-              <Ionicons name={verdict.icon as any} size={40} color={verdict.color} />
-              <Text style={[styles.verdictTitle, { color: verdict.color }]}>
-                {verdict.text}
-              </Text>
-              {results.resultsSummary.metadata.finalScore !== undefined && (
-                <Text style={styles.overallScoreText}>
-                  Aggregate Anomaly Score: {results.resultsSummary.metadata.finalScore}%
-                </Text>
+            {/* Controls */}
+            <View style={styles.controls}>
+              {loading ? (
+                <View style={styles.loadingContainer}>
+                  <ActivityIndicator color="#4facfe" size="large" />
+                  <Text style={styles.loadingText}>
+                    {step === 'uploading' ? `Uploading... ${uploadProgress}%` : 'Analyzing patterns...'}
+                  </Text>
+                  <Text style={styles.loadingSubText}>Running multi-model ensemble</Text>
+                </View>
+              ) : (
+                <TouchableOpacity
+                  style={[styles.verifyBtn, !selectedImage && styles.disabledBtn]}
+                  onPress={handleVerify}
+                  disabled={!selectedImage}
+                >
+                  <LinearGradient
+                    colors={selectedImage ? ['#4facfe', '#00f2fe'] : ['#333', '#333']}
+                    start={{ x: 0, y: 0 }}
+                    end={{ x: 1, y: 0 }}
+                    style={styles.btnGradient}
+                  >
+                    <Text style={styles.btnText}>INITIATE SCAN</Text>
+                    <Ionicons name="arrow-forward" size={20} color={selectedImage ? "#000" : "#666"} />
+                  </LinearGradient>
+                </TouchableOpacity>
               )}
             </View>
-
-            <View style={styles.divider} />
-            <Text style={styles.subHeader}>DETAILED ANALYSIS</Text>
-
-            {/* 2. Detailed Model Scores */}
-            {results.deepfakeModels.map((model, idx) => {
-              // Use finalScore (0-100) if available, otherwise calculate from score (0-1)
-              const displayScore = model.finalScore ?? (model.score ? Math.round(model.score * 100) : 0);
-
-              return (
-                <View key={idx} style={styles.modelRow}>
-                  <View style={styles.modelInfo}>
-                    <Text style={styles.modelName}>{model.name}</Text>
-                    <Text style={styles.modelStatus}>{model.status}</Text>
-                  </View>
-
-                  <View style={styles.scoreWrapper}>
-                    <View style={styles.scoreTrack}>
-                      <View
-                        style={[
-                          styles.scoreFill,
-                          {
-                            width: `${displayScore}%`,
-                            backgroundColor: getScoreColor(displayScore)
-                          }
-                        ]}
-                      />
-                    </View>
-                    <Text style={[styles.scoreValue, { color: getScoreColor(displayScore) }]}>
-                      {displayScore}%
-                    </Text>
-                  </View>
-                </View>
-              );
-            })}
-          </Animated.View>
+          </View>
         )}
 
+        <ErrorBanner error={error} onDismiss={() => setError({ ...error, visible: false })} />
       </ScrollView>
-
-      <ErrorBanner error={error} onDismiss={() => setError({ ...error, visible: false })} />
     </SafeAreaView>
   );
 };
 
 const styles = StyleSheet.create({
-  // ... (Keep your existing styles, and ADD/UPDATE the following for the results) ...
   container: {
     flex: 1,
     backgroundColor: '#050505',
@@ -378,6 +491,7 @@ const styles = StyleSheet.create({
   header: {
     marginBottom: 30,
     alignItems: 'center',
+    marginTop: 20,
   },
   statusBadge: {
     flexDirection: 'row',
@@ -405,7 +519,7 @@ const styles = StyleSheet.create({
   },
   headerTitle: {
     color: '#fff',
-    fontSize: 24,
+    fontSize: 28,
     fontWeight: '900',
     letterSpacing: 2,
   },
@@ -418,7 +532,7 @@ const styles = StyleSheet.create({
     marginBottom: 24,
   },
   uploadZone: {
-    height: 300,
+    height: 320,
     borderRadius: 20,
     overflow: 'hidden',
   },
@@ -444,7 +558,7 @@ const styles = StyleSheet.create({
     fontSize: 14,
   },
   previewContainer: {
-    height: 300,
+    height: 320,
     borderRadius: 20,
     overflow: 'hidden',
     position: 'relative',
@@ -509,33 +623,53 @@ const styles = StyleSheet.create({
   },
   loadingText: {
     color: '#4facfe',
-    marginTop: 10,
-    fontSize: 12,
+    marginTop: 12,
+    fontSize: 14,
+    fontWeight: 'bold',
     letterSpacing: 1,
   },
-  // UPDATED RESULT STYLES
-  resultsContainer: {
+  loadingSubText: {
+    color: '#666',
+    marginTop: 4,
+    fontSize: 12,
+  },
+  // Results Styles
+  resultContainer: {
     backgroundColor: '#121212',
     borderRadius: 24,
     padding: 24,
     borderWidth: 1,
     marginBottom: 30,
+    marginTop: 10,
   },
-  verdictHeader: {
+  verdictCard: {
     alignItems: 'center',
-    marginBottom: 20,
+    padding: 24,
+    borderWidth: 2,
+    borderRadius: 20,
+    backgroundColor: 'rgba(255,255,255,0.03)',
+    marginBottom: 24,
   },
   verdictTitle: {
     fontSize: 22,
     fontWeight: '900',
-    marginTop: 10,
+    marginTop: 16,
     letterSpacing: 1,
     textAlign: 'center',
   },
-  overallScoreText: {
+  verdictScore: {
+    color: '#fff',
+    fontSize: 18,
+    fontWeight: 'bold',
+    marginTop: 8,
+  },
+  verdictConfidence: {
     color: '#888',
     fontSize: 14,
-    marginTop: 5,
+    marginTop: 4,
+  },
+  detailsContainer: {
+    paddingTop: 10,
   },
   subHeader: {
     color: '#666',
@@ -544,51 +678,105 @@ const styles = StyleSheet.create({
     marginBottom: 15,
     letterSpacing: 1,
   },
-  divider: {
-    height: 1,
-    backgroundColor: '#2a2a2a',
-    marginVertical: 15,
-  },
   modelRow: {
-    marginBottom: 18,
+    marginBottom: 16,
+    backgroundColor: 'rgba(255,255,255,0.02)',
+    padding: 16,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.05)',
   },
   modelInfo: {
     flexDirection: 'row',
     justifyContent: 'space-between',
-    marginBottom: 8,
+    alignItems: 'center',
+    marginBottom: 12,
   },
   modelName: {
-    color: '#ccc',
-    fontSize: 14,
+    color: '#fff',
+    fontSize: 16,
     fontWeight: '600',
   },
-  modelStatus: {
-    color: '#666',
-    fontSize: 10,
-    textTransform: 'uppercase',
+  badgeContainer: {
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 8,
+    backgroundColor: 'rgba(255,255,255,0.05)',
   },
-  scoreWrapper: {
+  modelStatus: {
+    fontSize: 12,
+    fontWeight: 'bold',
+  },
+  modelError: {
+    color: '#ff4444',
+    fontSize: 12,
+    marginTop: 4,
+    fontStyle: 'italic',
+  },
+  modelDetails: {
+    color: '#888',
+    fontSize: 12,
+    marginTop: 8,
+    lineHeight: 18,
+  },
+  scoreContainer: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 12,
   },
-  scoreTrack: {
+  progressBarBg: {
     flex: 1,
-    height: 6,
-    backgroundColor: '#222',
-    borderRadius: 3,
+    height: 8,
+    backgroundColor: '#333',
+    borderRadius: 4,
     overflow: 'hidden',
   },
-  scoreFill: {
+  progressBarFill: {
     height: '100%',
-    borderRadius: 3,
+    borderRadius: 4,
   },
-  scoreValue: {
+  scoreText: {
+    color: '#fff',
     fontSize: 14,
     fontWeight: 'bold',
-    width: 45,
+    width: 40,
     textAlign: 'right',
   },
+  metricsContainer: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    marginTop: 16,
+    paddingTop: 16,
+    borderTopWidth: 1,
+    borderTopColor: '#333',
+  },
+  metricText: {
+    color: '#666',
+    fontSize: 12,
+  },
+  summaryText: {
+    color: '#aaa',
+    fontSize: 14,
+    marginTop: 20,
+    lineHeight: 22,
+    fontStyle: 'italic',
+    textAlign: 'center',
+  },
+  resetButton: {
+    marginTop: 24,
+    backgroundColor: '#222',
+    padding: 18,
+    borderRadius: 16,
+    alignItems: 'center',
+    borderWidth: 1,
+    borderColor: '#333',
+  },
+  resetButtonText: {
+    color: '#fff',
+    fontWeight: 'bold',
+    fontSize: 16,
+  },
+  // Error Banner Styles
   errorBanner: {
     position: 'absolute',
     bottom: 20,
@@ -603,6 +791,7 @@ const styles = StyleSheet.create({
     shadowOpacity: 0.5,
     shadowRadius: 20,
     elevation: 10,
+    zIndex: 100,
   },
   errorContent: {
     flexDirection: 'row',

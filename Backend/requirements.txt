@@ -4,3 +4,5 @@ pydantic
 httpx
 python-dotenv
 python-multipart
+openai>=1.0.0
+pillow>=10.0.0

@@ -1,0 +1,93 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CATCHY AI - Deepfake Detection System</title>
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <div class="container">
+        <!-- Status Badge -->
+        <div class="status-badge">
+            <div class="status-dot"></div>
+            <span class="status-text">SYSTEM ONLINE</span>
+        </div>
+
+        <!-- Header -->
+        <header class="header">
+            <h1 class="header-title">CATCHY<span class="accent">AI</span></h1>
+            <p class="header-subtitle">Multi-Model Deepfake Detection System</p>
+        </header>
+
+        <!-- Main Card -->
+        <div class="card">
+            <!-- Upload Zone / Image Preview -->
+            <div id="uploadZone" class="upload-zone" onclick="document.getElementById('fileInput').click()">
+                <div class="upload-gradient">
+                    <svg class="upload-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+                        <path d="M256 0C114.6 0 0 114.6 0 256s114.6 256 256 256 256-114.6 256-256S397.4 0 256 0zm0 448c-105.9 0-192-86.1-192-192S150.1 64 256 64s192 86.1 192 192-86.1 192-192 192z"/>
+                        <circle cx="256" cy="192" r="32"/>
+                        <circle cx="320" cy="256" r="32"/>
+                        <circle cx="256" cy="320" r="32"/>
+                        <circle cx="192" cy="256" r="32"/>
+                    </svg>
+                    <h2 class="upload-title">TAP TO SCAN</h2>
+                    <p class="upload-subtitle">Upload image for verification</p>
+                </div>
+            </div>
+
+            <div id="imagePreview" class="preview-container" style="display: none;">
+                <img id="previewImage" class="preview-image" alt="Preview">
+                <div id="scanLine" class="scan-line" style="display: none;"></div>
+                <button class="close-btn" onclick="resetImage()">
+                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="white" width="20" height="20">
+                        <path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/>
+                    </svg>
+                </button>
+            </div>
+
+            <input type="file" id="fileInput" accept="image/*" style="display: none;" onchange="handleFileSelect(event)">
+
+            <!-- Controls -->
+            <div class="controls">
+                <div id="loadingContainer" class="loading-container" style="display: none;">
+                    <div class="spinner"></div>
+                    <p class="loading-text" id="loadingText">Analyzing image patterns...</p>
+                </div>
+
+                <button id="verifyBtn" class="verify-btn" onclick="handleVerify()" disabled>
+                    <span>INITIATE SCAN</span>
+                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" width="20" height="20">
+                        <path d="M12 4l-1.41 1.41L16.17 11H4v2h12.17l-5.58 5.59L12 20l8-8z"/>
+                    </svg>
+                </button>
+            </div>
+        </div>
+
+        <!-- Results Container -->
+        <div id="resultsContainer" class="results-container" style="display: none;">
+            <div class="verdict-card" id="verdictCard">
+                <svg id="verdictIcon" class="verdict-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor">
+                    <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 15l-5-5 1.41-1.41L10 14.17l7.59-7.59L19 8l-9 9z"/>
+                </svg>
+                <h2 class="verdict-title" id="verdictTitle">AUTHENTIC MEDIA</h2>
+                <p class="verdict-score" id="verdictScore">Aggregate Score: 0%</p>
+                <p class="verdict-confidence" id="verdictConfidence">Confidence: High</p>
+            </div>
+
+            <div class="details-container">
+                <h3 class="sub-header">MODEL BREAKDOWN</h3>
+                <div id="modelBreakdown"></div>
+                <p class="summary-text" id="summaryText"></p>
+            </div>
+
+            <button class="reset-button" onclick="scanAnother()">
+                Scan Another Image
+            </button>
+        </div>
+    </div>
+
+    <script src="app.js"></script>
+</body>
+</html>
